@@ -42,14 +42,25 @@ Codex 没有这个接缝，所以同一个点子只能落在它支持的两种�
 
 | 插件 | 是什么 | 形态 |
 |---|---|---|
-| [`deepseek-balance`](plugins/deepseek-balance) | 查 DeepSeek 账户余额（可用 / 赠送 / 充值） | MCP 工具 + skill |
+| [`deepseek-balance`](plugins/deepseek-balance) | 查 DeepSeek 账户余额（可用 / 赠送 / 充值） | `/balance` 命令 + MCP 工具 + skill |
 
 ## 装
 
 1. 把本仓库 clone 到本地。
 2. 在 `~/.codex/config.toml` 里加上面那两段（市场 + 要启用的插件）。
 3. 重启 Codex。
-4. `deepseek-balance` 需要环境变量 `DEEPSEEK_API_KEY`（MCP 服务启动时读，改完要重启）。
+4. 敲 `/balance`。
+
+### 密钥从哪来
+
+`deepseek-balance` 按顺序找，找到就用：
+
+1. 环境变量 `DEEPSEEK_API_KEY`
+2. 环境变量 `ANTHROPIC_AUTH_TOKEN`
+3. `~/.claude/settings.json` 里的 `env.ANTHROPIC_AUTH_TOKEN` —— **给已经装过 Claude Code 版的人**，不用再配一遍
+
+> MCP 子进程只在**启动时**读环境变量，所以改了 1/2 要重启 Codex；走 3 的话每次都现读，改完 settings 直接再问一次即可。
+> 401 时工具会告诉你用的是哪一把 key（只说来源，不打印 key）。
 
 ## 加一个新插件
 

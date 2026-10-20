@@ -9,7 +9,8 @@
       "startup_timeout_sec": 10,
       "tool_timeout_sec": 60,
       "env_vars": [
-        "DEEPSEEK_API_KEY"
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN"
       ]
     }
   }

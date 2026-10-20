@@ -7,11 +7,49 @@
 // 协议：stdin/stdout 上按行收发 JSON-RPC 2.0（MCP stdio 传输）。
 // 只实现 initialize / tools/list / tools/call / ping 四个必须的。
 
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
 const BALANCE_URL = 'https://api.deepseek.com/user/balance'
 const SERVER_NAME = 'deepseek-balance'
 const SERVER_VERSION = '0.1.0'
 
-const KEY_VARS = ['DEEPSEEK_API_KEY']
+/** 找 key 的顺序：环境变量优先，最后回退到 Claude Code 的 settings。 */
+const KEY_VARS = ['DEEPSEEK_API_KEY', 'ANTHROPIC_AUTH_TOKEN']
+
+/**
+ * Claude Code 的 settings.json 里也放着一个 DeepSeek key（它被配成 Anthropic 兼容端点）。
+ * 已经装过 Claude mod 的人不必再配一遍环境变量——这条就是给他用的。
+ */
+const settingsKeyOf = () => {
+  try {
+    const path = join(homedir(), '.claude', 'settings.json')
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    const env = parsed?.env ?? {}
+
+    for (const name of KEY_VARS) {
+      const value = env[name]
+
+      if (typeof value === 'string' && value !== '') return { value, source: `${path} env.${name}` }
+    }
+  } catch {
+    // 没装过 Claude Code、或者文件坏了：跳过
+  }
+
+  return null
+}
+
+/** 返回 `{ value, source }`，找不到就是 null。 */
+const keyOf = () => {
+  for (const name of KEY_VARS) {
+    const value = process.env[name]
+
+    if (typeof value === 'string' && value !== '') return { value, source: `环境变量 ${name}` }
+  }
+
+  return settingsKeyOf()
+}
 
 /** 账号余额接口的返回，只取我们这个工具用得到的部分。 */
 const amountOf = (currency, total) => {
@@ -21,25 +59,16 @@ const amountOf = (currency, total) => {
   return currency === undefined || currency === '' ? total : `${total} ${currency}`
 }
 
-const keyOf = () => {
-  for (const name of KEY_VARS) {
-    const value = process.env[name]
-
-    if (typeof value === 'string' && value !== '') return value
-  }
-
-  return null
-}
-
 /** 查一次余额，返回给模型看的文本。 */
 const readBalance = async () => {
-  const key = keyOf()
+  const found = keyOf()
 
-  if (key === null) {
+  if (found === null) {
     return {
       text:
-        `没有找到 API key。把 DeepSeek 的 key 放进环境变量 ${KEY_VARS.join(' 或 ')}，` +
-        `再重启 Codex（MCP 服务在启动时读环境变量）。`,
+        `没有找到 DeepSeek 的 API key。查过：环境变量 ${KEY_VARS.join(' / ')}、` +
+        `以及 ${join(homedir(), '.claude', 'settings.json')} 里的 env。` +
+        `把 key 放进环境变量 DEEPSEEK_API_KEY 后重启 Codex（MCP 子进程只在启动时读环境变量）。`,
       isError: true,
     }
   }
@@ -47,7 +76,7 @@ const readBalance = async () => {
   let response
 
   try {
-    response = await fetch(BALANCE_URL, { headers: { Authorization: `Bearer ${key}` } })
+    response = await fetch(BALANCE_URL, { headers: { Authorization: `Bearer ${found.value}` } })
   } catch (error) {
     return { text: `请求失败：${error instanceof Error ? error.message : String(error)}`, isError: true }
   }
@@ -55,7 +84,10 @@ const readBalance = async () => {
   const body = await response.text()
 
   if (!response.ok) {
-    return { text: `DeepSeek 返回 HTTP ${response.status}：${body.slice(0, 300)}`, isError: true }
+    // 401 时把 key 的来源说出来，方便判断是不是用错了那把 key（不打印 key 本身）
+    const hint = response.status === 401 ? `（key 来自：${found.source}）` : ''
+
+    return { text: `DeepSeek 返回 HTTP ${response.status}${hint}：${body.slice(0, 300)}`, isError: true }
   }
 
   let payload
@@ -157,6 +189,17 @@ const handle = async message => {
 
 // ---- stdio 按行收发 ------------------------------------------------------
 let buffer = ''
+let pending = 0
+let ending = false
+
+/**
+ * stdin 关了之后**不要** `process.exit()`：在有句柄正在关闭时强退，Node 会在
+ * Windows 上抛 libuv 断言（`handle->flags & UV_HANDLE_CLOSING`）并以 0xC0000409 崩掉。
+ * 没有在飞的请求时，事件循环会自己结束，退出码是 0。
+ */
+const maybeExit = () => {
+  // 故意留空：让事件循环耗尽后自然退出
+}
 
 process.stdin.setEncoding('utf8')
 process.stdin.on('data', chunk => {
@@ -171,7 +214,17 @@ process.stdin.on('data', chunk => {
 
     if (line !== '') {
       try {
-        void handle(JSON.parse(line))
+        const message = JSON.parse(line)
+
+        pending += 1
+        void handle(message)
+          .catch(error => {
+            process.stderr.write(`${SERVER_NAME}: handler failed: ${error instanceof Error ? error.message : String(error)}\n`)
+          })
+          .finally(() => {
+            pending -= 1
+            maybeExit()
+          })
       } catch (error) {
         // 一行坏 JSON 不该弄死整个服务
         process.stderr.write(`${SERVER_NAME}: bad line: ${error instanceof Error ? error.message : String(error)}\n`)
@@ -182,4 +235,7 @@ process.stdin.on('data', chunk => {
   }
 })
 
-process.stdin.on('end', () => process.exit(0))
+process.stdin.on('end', () => {
+  ending = true
+  maybeExit()
+})
